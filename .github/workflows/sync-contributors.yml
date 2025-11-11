@@ -16,23 +16,27 @@ jobs:
 
       - name: Generate contributors markdown
         run: |
+          set -e
           page=1
           : > contributors.json
-          # 最多 50 页（5 k 用户）防死循环
           while [ $page -le 50 ]; do
+            # 注意：page=$page  不能有空格！
             curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
                  -H "Accept: application/vnd.github+json" \
                  "${{ github.api_url }}/repos/${{ github.repository }}/contributors?per_page=100&page=$page&anon=1" > page.json
 
+            # 如果返回的不是数组，直接停
+            [ "$(jq 'type' page.json)" != '"array"' ] && break
+
             len=$(jq 'length' page.json | tr -d '\n\r')
-            [ "$len" -eq 0 ] && break
+            [ "$len" = "0" ] && break
 
             jq -c '.[]' page.json >> contributors.json
             ((page++))
           done
 
-          # 生成 markdown
-          jq -r 'select(.login) | "- [@\(.login)](https://github.com/\(.login))"' contributors.json \
+          # 只保留有 login 字段的对象 -> 生成 markdown
+          jq -r 'select(type=="object" and .login) | "- [@\(.login)](https://github.com/\(.login))"' contributors.json \
           | sort -u > contributors.md
 
           echo "Generated contributors list:"
