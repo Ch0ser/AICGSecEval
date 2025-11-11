@@ -16,21 +16,24 @@ jobs:
 
       - name: Generate contributors markdown
         run: |
-          # 分页拉全量贡献者（含匿名）
           page=1
-          > contributors_raw.json
+          : > contributors.json          # 新建空文件
           while :; do
+            # 拉一页
             curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
                  -H "Accept: application/vnd.github+json" \
-                 "${{ github.api_url }}/repos/${{ github.repository }}/contributors?per_page=100&page=$page&anon=1" >> contributors_page.json
-            # 空页即停
-            [ "$(jq 'length' contributors_page.json)" -eq 0 ] && break
-            jq '.[]' contributors_page.json >> contributors_raw.json
+                 "${{ github.api_url }}/repos/${{ github.repository }}/contributors?per_page=100&page=$page&anon=1" > page.json
+
+            # 如果这一页空，就退出
+            [ "$(jq 'length' page.json | tr -d '\n\r')" -eq 0 ] && break
+
+            # 拼到总文件
+            jq -c '.[]' page.json >> contributors.json
             ((page++))
           done
 
-          # 只保留有 login 字段的用户（匿名 contributor 没有 login）
-          jq -r 'select(.login) | "- [@\(.login)](https://github.com/\(.login))"' contributors_raw.json \
+          # 只保留有 login 的用户 -> 拼 markdown
+          jq -r 'select(.login) | "- [@\(.login)](https://github.com/\(.login))"' contributors.json \
           | sort -u > contributors.md
 
           echo "Generated contributors list:"
