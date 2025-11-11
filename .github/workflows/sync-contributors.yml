@@ -1,120 +1,101 @@
-name: Sync Contributors
+name: Update Contributors in README
 
+# 触发条件：可以根据需要调整
 on:
+  # 1. 定时触发（每周一凌晨运行）
+  schedule:
+    - cron: '0 0 * * 1'
+  # 2. 手动触发
   workflow_dispatch:
-
-permissions:
-  contents: write
-  pull-requests: read
+  # 3. 当有新的贡献者加入时（push到main分支时触发）
+  push:
+    branches: [ main, master ]
+    paths-ignore: # 忽略README文件本身的变更，避免循环触发
+      - 'README.md'
+      - 'README_zh.md'
 
 jobs:
-  sync:
+  update-contributors:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      # 步骤1：检出仓库代码
+      - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 确保能获取完整的贡献者信息
 
-      - name: Generate contributors markdown
+      # 步骤2：安装必要依赖（jq用于JSON处理）
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      # 步骤3：生成贡献者HTML内容
+      - name: Generate contributors content
+        id: generate_contributors
         run: |
-          set -e
-          page=1
-          : > contributors.json
-          API_URL="${{ github.api_url }}/repos/${{ github.repository }}/contributors"
-          echo "使用的贡献者API地址: $API_URL"  # 调试：打印API地址确认是否正确
-
-          # 完整遍历所有贡献者分页（最多10页避免无限循环）
-          while [ $page -le 10 ]; do
-            echo "正在获取第 $page 页贡献者..."
-            # 调用API，增加--fail参数让curl在HTTP错误时返回非0退出码，同时保留状态码输出
-            curl -s -w "HTTP_STATUS:%{http_code}" \
-                 --fail \
-                 -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-                 -H "Accept: application/vnd.github.v3+json" \  # 明确指定v3版本，兼容性更好
-                 "$API_URL?per_page=100&page=$page" > page_with_status.json
+          # 获取仓库所有者和仓库名（从GitHub环境变量中获取）
+          OWNER="${{ github.repository_owner }}"
+          REPO="${{ github.event.repository.name }}"
+          
+          # 使用GitHub API获取贡献者信息（按贡献次数排序，取前100名）
+          CONTRIBUTORS=$(curl -s "https://api.github.com/repos/$OWNER/$REPO/contributors?per_page=100" \
+            -H "Authorization: Bearer ${{ github.token }}" \
+            -H "Accept: application/vnd.github.v3+json")
+          
+          # 生成HTML格式的贡献者列表（头像+链接）
+          CONTRIBUTORS_HTML=""
+          echo "$CONTRIBUTORS" | jq -r '.[] | .login, .avatar_url, .html_url' | while read -r login; do
+            read -r avatar_url
+            read -r html_url
             
-            # 检查curl是否成功发起请求（非网络层面错误）
-            CURL_EXIT_CODE=$?
-            if [ $CURL_EXIT_CODE -ne 0 ]; then
-              echo "curl请求失败，退出码: $CURL_EXIT_CODE"
-              cat page_with_status.json  # 打印可能的错误信息
-              break
-            fi
-
-            # 提取HTTP状态码和响应体
-            HTTP_STATUS=$(grep -o 'HTTP_STATUS:[0-9]*' page_with_status.json | cut -d: -f2)
-            sed 's/HTTP_STATUS:[0-9]*//' page_with_status.json > page.json
-            
-            # 处理API错误状态码
-            if [ "$HTTP_STATUS" -ne 200 ]; then
-              echo "API返回错误状态码: $HTTP_STATUS"
-              cat page.json  # 打印API返回的错误详情
-              break
-            fi
-
-            # 验证响应体是否为空
-            if [ ! -s page.json ]; then
-              echo "第 $page 页响应体为空，停止抓取"
-              break
-            fi
-
-            # 验证响应格式是否为数组
-            if [ "$(jq 'type' page.json 2>/dev/null)" != '"array"' ]; then
-              echo "第 $page 页响应格式错误，不是JSON数组"
-              cat page.json
-              break
-            fi
-
-            len=$(jq 'length' page.json | tr -d '\n\r')
-            echo "第 $page 页获取到 $len 个贡献者"
-            if [ "$len" -eq 0 ]; then
-              break  # 没有更多贡献者
-            fi
-
-            # 追加到总列表
-            jq -c '.[]' page.json >> contributors.json
-            ((page++))
+            # 头像样式：统一大小为48px，圆形，间距8px
+            CONTRIBUTORS_HTML+="<a href=\"$html_url\" target=\"_blank\" rel=\"noopener noreferrer\" title=\"$login\">"
+            CONTRIBUTORS_HTML+="<img src=\"$avatar_url\" alt=\"$login\" width=\"48\" height=\"48\" style=\"border-radius: 50%; margin: 0 8px 8px 0;\" />"
+            CONTRIBUTORS_HTML+="</a>"
           done
+          
+          # 将生成的HTML内容存入环境变量，供后续步骤使用
+          echo "contributors_html<<EOF" >> "$GITHUB_ENV"
+          echo "$CONTRIBUTORS_HTML" >> "$GITHUB_ENV"
+          echo "EOF" >> "$GITHUB_ENV"
 
-          # 生成带头像的贡献者列表（移除@用户名）
-          jq -r 'select(type=="object" and .login) | 
-                 "- [![Avatar](https://github.com/\(.login).png?size=24)](https://github.com/\(.login))"' \
-          contributors.json 2>/dev/null | sort -u > contributors.md
-
-          # 容错处理：如果没有获取到贡献者，至少显示仓库所有者
-          if [ ! -s contributors.md ]; then
-            owner=$(echo ${{ github.repository }} | cut -d/ -f1)
-            echo "- [![Avatar](https://github.com/$owner.png?size=24)](https://github.com/$owner)" > contributors.md
-            echo "未获取到贡献者，使用仓库所有者: $owner"
-          fi
-
-          echo "生成的贡献者列表："
-          cat contributors.md
-
-      - name: Inject into README.md
+      # 步骤4：替换README.md和README_zh.md中的贡献者区域
+      - name: Update README files
         run: |
-          perl -0777 -pe '
-            open my $fh, "<", "contributors.md" or die $!;
-            local $/;
-            my $contributors = <$fh>;
-            close $fh;
-            s/(<!-- readme: contributors -start -->).*?(<!-- readme: contributors -end -->)/$1\n$contributors\n$2/s
-          ' README.md > README.md.tmp && mv README.md.tmp README.md
+          # 定义替换函数
+          update_readme() {
+            local file="$1"
+            local start_comment="<!-- readme: contributors -start -->"
+            local end_comment="<!-- readme: contributors -end -->"
+            
+            # 检查文件是否存在
+            if [ ! -f "$file" ]; then
+              echo "警告：$file 不存在，跳过更新"
+              return
+            fi
+            
+            # 使用sed命令替换两个注释之间的内容（兼容Linux/macOS）
+            # 注意：如果是macOS，需要将sed命令中的 -i 改为 -i ''
+            sed -i.bak "s|$start_comment.*$end_comment|$start_comment\n\n$contributors_html\n\n$end_comment|g" "$file"
+            
+            # 删除备份文件
+            rm -f "$file.bak"
+            
+            echo "成功更新 $file 中的贡献者信息"
+          }
+          
+          # 执行替换
+          update_readme "README.md"
+          update_readme "README_zh.md"
 
-      - name: Inject into README_zh.md
-        run: |
-          perl -0777 -pe '
-            open my $fh, "<", "contributors.md" or die $!;
-            local $/;
-            my $contributors = <$fh>;
-            close $fh;
-            s/(<!-- readme: contributors -start -->).*?(<!-- readme: contributors -end -->)/$1\n$contributors\n$2/s
-          ' README_zh.md > README_zh.md.tmp && mv README_zh.md.tmp README_zh.md
-
-      - name: Commit & push
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add README.md README_zh.md
-          git diff --cached --quiet || (
-            git commit -m "docs: sync contributors with avatars [skip ci]" && git push
-          )
+      # 步骤5：提交更改到仓库
+      - name: Commit and push changes
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          # 提交信息
+          commit_message: "docs: update contributors list"
+          # 只提交两个README文件
+          file_pattern: "README.md README_zh.md"
+          # 提交者信息（可自定义）
+          commit_user_name: "github-actions[bot]"
+          commit_user_email: "github-actions[bot]@users.noreply.github.com"
+          commit_author: "github-actions[bot] <github-actions[bot]@users.noreply.github.com>"
