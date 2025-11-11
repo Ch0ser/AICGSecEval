@@ -225,7 +225,7 @@ We sincerely appreciate their invaluable contributions to this project.
 
 **🙌 Contributors**
 <!-- readme: contributors -start -->
-
+- No contributors found
 <!-- readme: contributors -end -->
 
 ## 📱 Join the Community
