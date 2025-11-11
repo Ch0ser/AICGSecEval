@@ -1,144 +1,101 @@
 name: Update Contributors in README
 
-# 仅保留手动触发（移除定时和push触发）
 on:
   workflow_dispatch:
     inputs:
-      # 可选：添加手动触发时的备注输入
       comment:
-        description: '手动触发更新贡献者列表的备注'
+        description: '手动触发备注'
         required: false
-        default: 'Update contributors list manually'
+        default: 'Update contributors list'
 
 jobs:
   update-contributors:
     runs-on: ubuntu-latest
     steps:
-      # 步骤1：检出仓库代码（确保获取完整历史和分支）
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: ${{ github.ref }} # 确保检出当前分支
+          ref: ${{ github.ref }}
 
-      # 步骤2：安装依赖（jq用于JSON处理）
-      - name: Install dependencies
+      - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
 
-      # 步骤3：获取并验证贡献者信息（添加详细日志）
-      - name: Fetch and verify contributors
-        id: fetch_contributors
+      # 关键修复：用jq直接生成完整HTML，避免循环读取错误
+      - name: Generate contributors HTML (fixed)
+        id: gen_contrib
         run: |
-          # 获取仓库信息
           OWNER="${{ github.repository_owner }}"
           REPO="${{ github.event.repository.name }}"
-          echo "📌 正在获取 $OWNER/$REPO 的贡献者信息"
           
-          # 调用GitHub API获取贡献者（添加调试日志）
-          echo "🔍 调用GitHub API：https://api.github.com/repos/$OWNER/$REPO/contributors?per_page=100"
-          CONTRIBUTORS=$(curl -s -v "https://api.github.com/repos/$OWNER/$REPO/contributors?per_page=100" \
-            -H "Authorization: Bearer ${{ github.token }}" \
-            -H "Accept: application/vnd.github.v3+json")
+          # 获取贡献者API数据（带日志）
+          echo "🔍 Fetching contributors from https://api.github.com/repos/$OWNER/$REPO/contributors?per_page=100"
+          CONTRIBUTORS=$(curl -s -H "Authorization: Bearer ${{ github.token }}" \
+            "https://api.github.com/repos/$OWNER/$REPO/contributors?per_page=100")
           
-          # 验证API响应
-          if [ -z "$CONTRIBUTORS" ] || [ "$CONTRIBUTORS" == "[]" ]; then
-            echo "⚠️ 未获取到贡献者信息（可能仓库无贡献者或API调用失败）"
-            echo "contributors_html=<!-- 暂无贡献者信息 -->" >> "$GITHUB_ENV"
-            exit 0
-          fi
+          # 用jq直接生成完整HTML字符串（无循环，无读取错误）
+          CONTRIBUTORS_HTML=$(echo "$CONTRIBUTORS" | jq -r '
+            .[] | 
+            "<a href=\"\(.html_url)\" target=\"_blank\" rel=\"noopener noreferrer\" title=\"\(.login)\">" +
+            "<img src=\"\(.avatar_url)\" alt=\"\(.login)\" width=\"48\" height=\"48\" style=\"border-radius: 50%; margin: 0 8px 8px 0; object-fit: cover;\" />" +
+            "</a>"
+          ' | tr -d '\n') # 移除多余换行，紧凑显示
           
-          # 显示获取到的贡献者数量（调试用）
-          CONTRIBUTOR_COUNT=$(echo "$CONTRIBUTORS" | jq '. | length')
-          echo "✅ 成功获取到 $CONTRIBUTOR_COUNT 名贡献者"
+          # 调试：输出生成的HTML（前200字符，避免日志过长）
+          echo "📝 Generated HTML (preview): ${CONTRIBUTORS_HTML:0:200}..."
+          echo "📏 HTML length: ${#CONTRIBUTORS_HTML} characters"
           
-          # 生成HTML格式的贡献者列表（优化格式）
-          CONTRIBUTORS_HTML=""
-          echo "$CONTRIBUTORS" | jq -r '.[] | .login, .avatar_url, .html_url' | while read -r login; do
-            read -r avatar_url
-            read -r html_url
-            
-            # 生成单个贡献者的HTML（增加兼容性）
-            CONTRIBUTOR_ITEM="<a href=\"$html_url\" target=\"_blank\" rel=\"noopener noreferrer\" title=\"$login\">"
-            CONTRIBUTOR_ITEM+="<img src=\"$avatar_url\" alt=\"$login\" width=\"48\" height=\"48\" style=\"border-radius: 50%; margin: 0 8px 8px 0; object-fit: cover;\" />"
-            CONTRIBUTOR_ITEM+="</a>"
-            
-            CONTRIBUTORS_HTML+="$CONTRIBUTOR_ITEM"
-          done
-          
-          # 输出生成的HTML（调试用，避免过长）
-          echo "📝 生成的贡献者HTML长度：${#CONTRIBUTORS_HTML} 字符"
-          echo "contributors_html<<EOF" >> "$GITHUB_ENV"
-          echo "$CONTRIBUTORS_HTML" >> "$GITHUB_ENV"
-          echo "EOF" >> "$GITHUB_ENV"
+          # 存入环境变量（用printf确保特殊字符不被转义）
+          printf "contributors_html=%s" "$CONTRIBUTORS_HTML" >> "$GITHUB_ENV"
 
-      # 步骤4：替换README文件（修复核心问题）
-      - name: Update README files (fixed replacement)
-        id: update_readme
+      # 简化替换逻辑，确保内容正确插入
+      - name: Update README files
+        id: update_files
         run: |
-          # 定义替换函数（使用更可靠的多行替换）
           update_readme() {
             local file="$1"
-            local start_tag="<!-- readme: contributors -start -->"
-            local end_tag="<!-- readme: contributors -end -->"
+            local start="<!-- readme: contributors -start -->"
+            local end="<!-- readme: contributors -end -->"
             
-            # 检查文件是否存在
-            if [ ! -f "$file" ]; then
-              echo "⚠️ $file 不存在，跳过"
-              return 1
-            fi
+            # 检查文件和标记
+            [ ! -f "$file" ] && echo "⚠️ $file not found" && return 1
+            grep -qxF "$start" "$file" && grep -qxF "$end" "$file" || {
+              echo "❌ $file missing tags" && return 1
+            }
             
-            # 检查文件中是否包含目标标记
-            if ! grep -qxF "$start_tag" "$file" || ! grep -qxF "$end_tag" "$file"; then
-              echo "❌ $file 中未找到完整的标记："
-              echo "   需要同时包含："
-              echo "   $start_tag"
-              echo "   $end_tag"
-              grep -n "$start_tag\|$end_tag" "$file" || echo "   标记完全未找到"
-              return 1
-            fi
+            # 用awk替换：保留标记，插入HTML（处理多空行）
+            awk -v s="$start" -v e="$end" -v c="$contributors_html" '
+              BEGIN { in_block=0 }
+              $0 == s { print; print c; in_block=1; next }
+              $0 == e { in_block=0 }
+              !in_block { print }
+            ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
             
-            # 使用awk进行多行替换（解决sed多行匹配问题）
-            # 核心逻辑：找到start_tag后，替换到end_tag之间的所有内容
-            awk -v start="$start_tag" -v end="$end_tag" -v content="$contributors_html" '
-              BEGIN { in_block = 0 }
-              $0 == start {
-                print $0
-                print ""  # 空行分隔
-                print content
-                print ""  # 空行分隔
-                in_block = 1
-                next
-              }
-              $0 == end {
-                in_block = 0
-              }
-              !in_block { print $0 }
-            ' "$file" > "$file.tmp"
-            
-            # 替换原文件
-            mv "$file.tmp" "$file"
-            
-            # 验证替换结果
+            # 验证插入结果
             if grep -q "$contributors_html" "$file"; then
-              echo "✅ $file 替换成功"
+              echo "✅ $file updated successfully"
               return 0
             else
-              echo "❌ $file 替换失败，未找到插入的内容"
+              echo "❌ Failed to insert content into $file"
+              # 输出文件中标记区域的内容，方便调试
+              echo "📋 Current content between tags in $file:"
+              awk -v s="$start" -v e="$end" '
+                $0 == s { flag=1; next }
+                $0 == e { flag=0 }
+                flag { print }
+              ' "$file"
               return 1
             fi
           }
           
-          # 执行替换（添加错误处理）
+          # 执行更新
           if update_readme "README.md" && update_readme "README_zh.md"; then
-            echo "📊 所有README文件更新完成"
             echo "update_success=true" >> "$GITHUB_ENV"
           else
-            echo "❌ 部分文件更新失败，请查看日志"
             echo "update_success=false" >> "$GITHUB_ENV"
           fi
 
-      # 步骤5：仅当更新成功时提交更改
-      - name: Commit and push changes
+      - name: Commit changes
         if: env.update_success == 'true'
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
@@ -146,19 +103,12 @@ jobs:
           file_pattern: "README.md README_zh.md"
           commit_user_name: "github-actions[bot]"
           commit_user_email: "github-actions[bot]@users.noreply.github.com"
-          commit_author: "github-actions[bot] <github-actions[bot]@users.noreply.github.com>"
-          push_options: "--force-with-lease" # 避免冲突
 
-      # 步骤6：输出结果摘要
-      - name: Show final result
+      - name: Final result
         run: |
           if [ "${{ env.update_success }}" == "true" ]; then
-            echo "🎉 贡献者列表更新完成！"
-            echo "📋 请查看README.md和README_zh.md中的变更"
+            echo "🎉 贡献者列表更新成功！"
           else
-            echo "❌ 贡献者列表更新失败！"
-            echo "🔍 请检查："
-            echo "   1. README文件中是否包含正确的标记"
-            echo "   2. 仓库是否有贡献者信息"
-            echo "   3. 查看上方日志获取详细错误"
+            echo "❌ 更新失败，请查看上方日志中的「Current content between tags」信息"
+            exit 1
           fi
