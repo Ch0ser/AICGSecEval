@@ -218,7 +218,8 @@ A.S.E​ 由腾讯安全平台部悟空代码安全团队联合以下学术单�
 
 **🙌 Contributors**
 <!-- readme: contributors -start -->
-- No contributors found
+- [@Ch0ser](https://github.com/Ch0ser)
+
 <!-- readme: contributors -end -->
 
 
