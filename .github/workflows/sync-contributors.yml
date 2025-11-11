@@ -18,38 +18,35 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.ref }}
 
-      - name: Install jq
-        run: sudo apt-get update && sudo apt-get install -y jq
+      - name: Install dependencies (jq + perl)
+        run: sudo apt-get update && sudo apt-get install -y jq perl
 
-      # 关键修复：用jq直接生成完整HTML，避免循环读取错误
-      - name: Generate contributors HTML (fixed)
+      # 步骤1：生成HTML并写入临时文件（避免变量传递截断）
+      - name: Generate contributors HTML
         id: gen_contrib
         run: |
           OWNER="${{ github.repository_owner }}"
           REPO="${{ github.event.repository.name }}"
           
-          # 获取贡献者API数据（带日志）
-          echo "🔍 Fetching contributors from https://api.github.com/repos/$OWNER/$REPO/contributors?per_page=100"
+          # 获取贡献者数据
           CONTRIBUTORS=$(curl -s -H "Authorization: Bearer ${{ github.token }}" \
             "https://api.github.com/repos/$OWNER/$REPO/contributors?per_page=100")
           
-          # 用jq直接生成完整HTML字符串（无循环，无读取错误）
-          CONTRIBUTORS_HTML=$(echo "$CONTRIBUTORS" | jq -r '
+          # 用jq生成HTML并写入临时文件（无变量长度限制）
+          echo "$CONTRIBUTORS" | jq -r '
             .[] | 
             "<a href=\"\(.html_url)\" target=\"_blank\" rel=\"noopener noreferrer\" title=\"\(.login)\">" +
             "<img src=\"\(.avatar_url)\" alt=\"\(.login)\" width=\"48\" height=\"48\" style=\"border-radius: 50%; margin: 0 8px 8px 0; object-fit: cover;\" />" +
             "</a>"
-          ' | tr -d '\n') # 移除多余换行，紧凑显示
+          ' | tr -d '\n' > /tmp/contributors.html
           
-          # 调试：输出生成的HTML（前200字符，避免日志过长）
-          echo "📝 Generated HTML (preview): ${CONTRIBUTORS_HTML:0:200}..."
-          echo "📏 HTML length: ${#CONTRIBUTORS_HTML} characters"
-          
-          # 存入环境变量（用printf确保特殊字符不被转义）
-          printf "contributors_html=%s" "$CONTRIBUTORS_HTML" >> "$GITHUB_ENV"
+          # 验证临时文件（确保非空）
+          HTML_SIZE=$(stat -c%s /tmp/contributors.html)
+          echo "📏 HTML file size: $HTML_SIZE bytes"
+          [ $HTML_SIZE -eq 0 ] && echo "❌ HTML is empty" && exit 1
 
-      # 简化替换逻辑，确保内容正确插入
-      - name: Update README files
+      # 步骤2：用perl替换（支持长字符串+精准多行匹配）
+      - name: Update README files (perl replacement)
         id: update_files
         run: |
           update_readme() {
@@ -59,31 +56,33 @@ jobs:
             
             # 检查文件和标记
             [ ! -f "$file" ] && echo "⚠️ $file not found" && return 1
-            grep -qxF "$start" "$file" && grep -qxF "$end" "$file" || {
-              echo "❌ $file missing tags" && return 1
-            }
+            if ! grep -qF "$start" "$file" || ! grep -qF "$end" "$file"; then
+              echo "❌ $file missing tags (start/end)"
+              grep -nF "$start\|$end" "$file" || echo "   Tags not found at all"
+              return 1
+            fi
             
-            # 用awk替换：保留标记，插入HTML（处理多空行）
-            awk -v s="$start" -v e="$end" -v c="$contributors_html" '
-              BEGIN { in_block=0 }
-              $0 == s { print; print c; in_block=1; next }
-              $0 == e { in_block=0 }
-              !in_block { print }
-            ' "$file" > "$file.tmp" && mv "$file.tmp" "$file"
+            # 核心：用perl进行多行替换（支持长字符串，无截断）
+            perl -0777 -i.bak -pe "
+              s|$start\n.*?$end|$start\n$(cat /tmp/contributors.html)\n$end|gs
+            " "$file"
             
-            # 验证插入结果
-            if grep -q "$contributors_html" "$file"; then
+            # 删除备份文件
+            rm -f "$file.bak"
+            
+            # 验证替换结果（检查标记之间是否非空）
+            CONTENT_BETWEEN_TAGS=$(awk -v s="$start" -v e="$end" '
+              $0 == s { flag=1; next }
+              $0 == e { flag=0 }
+              flag { print }
+            ' "$file")
+            
+            if [ -n "$CONTENT_BETWEEN_TAGS" ]; then
               echo "✅ $file updated successfully"
+              echo "📋 Content between tags (preview): ${CONTENT_BETWEEN_TAGS:0:100}..."
               return 0
             else
-              echo "❌ Failed to insert content into $file"
-              # 输出文件中标记区域的内容，方便调试
-              echo "📋 Current content between tags in $file:"
-              awk -v s="$start" -v e="$end" '
-                $0 == s { flag=1; next }
-                $0 == e { flag=0 }
-                flag { print }
-              ' "$file"
+              echo "❌ $file update failed: content between tags is empty"
               return 1
             fi
           }
@@ -109,6 +108,6 @@ jobs:
           if [ "${{ env.update_success }}" == "true" ]; then
             echo "🎉 贡献者列表更新成功！"
           else
-            echo "❌ 更新失败，请查看上方日志中的「Current content between tags」信息"
+            echo "❌ 更新失败，请查看上方日志中的「Content between tags」信息"
             exit 1
           fi
