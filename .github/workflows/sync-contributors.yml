@@ -1,12 +1,10 @@
 name: Sync Contributors
 
-# 仅手动触发
 on:
   workflow_dispatch:
 
 permissions:
-  contents: write  # 仅保留必要的内容写入权限
-  pull-requests: read  # 可选：如需处理PR相关操作
+  contents: write
 
 jobs:
   sync:
@@ -21,59 +19,52 @@ jobs:
           page=1
           : > contributors.json
           while [ $page -le 50 ]; do
-            # 改进API调用：增加状态码检查，移除可能无效的anon参数
-            curl -s -w "HTTP_STATUS:%{http_code}" \
-                 -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
                  -H "Accept: application/vnd.github+json" \
-                 "${{ github.api_url }}/repos/${{ github.repository }}/contributors?per_page=100&page=$page" > page_with_status.json
-            
-            # 分离状态码和响应体
-            HTTP_STATUS=$(grep -o 'HTTP_STATUS:[0-9]*' page_with_status.json | cut -d: -f2)
-            sed 's/HTTP_STATUS:[0-9]*//' page_with_status.json > page.json
-            
-            # 处理HTTP错误
-            if [ "$HTTP_STATUS" -ne 200 ]; then
-              echo "API请求失败，状态码: $HTTP_STATUS"
-              cat page.json
-              break
-            fi
+                 "${{ github.api_url }}/repos/${{ github.repository }}/contributors?per_page=100&page=$page&anon=1" > page.json
 
-            # 验证响应格式
-            if [ "$(jq 'type' page.json 2>/dev/null)" != '"array"' ]; then
-              echo "响应不是有效的数组，停止抓取"
-              break
-            fi
+            [ "$(jq 'type' page.json 2>/dev/null)" != '"array"' ] && break
 
-            len=$(jq 'length' page.json | tr -d '\n\r')
+            len=$(jq 'length' page.json 2>/dev/null | tr -d '\n\r')
             [ "$len" = "0" ] && break
 
             jq -c '.[]' page.json >> contributors.json
             ((page++))
           done
 
-          # 生成贡献者列表，增加容错处理
+          # 生成贡献者列表并转义特殊字符
           jq -r 'select(type=="object" and .login) | "- [@\(.login)](https://github.com/\(.login))"' contributors.json 2>/dev/null \
-          | sort -u > contributors.md
+          | sort -u \
+          | sed 's/[\\/&]/\\&/g' > contributors.md  # 关键修复：转义Perl特殊字符
 
           # 确保文件不为空
           if [ ! -s contributors.md ]; then
-            echo "警告：未找到贡献者数据，使用默认内容"
-            echo "- [@$(echo ${{ github.repository }} | cut -d/ -f1)](https://github.com/$(echo ${{ github.repository }} | cut -d/ -f1))" > contributors.md
+            echo "- [@$(echo ${{ github.repository }} | cut -d/ -f1 | sed 's/[\\/&]/\\&/g')](https://github.com/$(echo ${{ github.repository }} | cut -d/ -f1))" > contributors.md
           fi
 
-          echo "生成的贡献者列表："
+          echo "Generated contributors list:"
           cat contributors.md
 
       - name: Inject into README.md
         run: |
+          # 使用文件读取方式避免命令行参数注入问题
           perl -0777 -pe '
-            s/(<!--\s*readme: contributors -start\s*-->).*?(<!--\s*readme: contributors -end\s*-->)/$1\n'"$(cat contributors.md)"'\n$2/s
+            open my $fh, "<", "contributors.md" or die $!;
+            local $/;
+            my $contributors = <$fh>;
+            close $fh;
+            s/(<!-- readme: contributors -start -->).*?(<!-- readme: contributors -end -->)/$1\n$contributors\n$2/s
           ' README.md > README.md.tmp && mv README.md.tmp README.md
 
       - name: Inject into README_zh.md
         run: |
+          # 同样优化中文README的注入方式
           perl -0777 -pe '
-            s/(<!--\s*readme: contributors -start\s*-->).*?(<!--\s*readme: contributors -end\s*-->)/$1\n'"$(cat contributors.md)"'\n$2/s
+            open my $fh, "<", "contributors.md" or die $!;
+            local $/;
+            my $contributors = <$fh>;
+            close $fh;
+            s/(<!-- readme: contributors -start -->).*?(<!-- readme: contributors -end -->)/$1\n$contributors\n$2/s
           ' README_zh.md > README_zh.md.tmp && mv README_zh.md.tmp README_zh.md
 
       - name: Commit & push
