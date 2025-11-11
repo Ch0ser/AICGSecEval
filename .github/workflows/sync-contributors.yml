@@ -1,12 +1,12 @@
 name: Sync Contributors
 
+# 仅手动触发
 on:
   workflow_dispatch:
 
 permissions:
-  contents: write
-  # 新增必要权限：读取仓库贡献者信息
-  contributors: read
+  contents: write  # 仅保留必要的内容写入权限
+  pull-requests: read  # 可选：如需处理PR相关操作
 
 jobs:
   sync:
@@ -20,71 +20,48 @@ jobs:
           set -e
           page=1
           : > contributors.json
-          
-          # 增加 API 响应调试
-          echo "Fetching contributors from ${{ github.api_url }}/repos/${{ github.repository }}/contributors"
-          
           while [ $page -le 50 ]; do
-            # 修复 API 调用：移除可能无效的 anon=1 参数，增加错误捕获
+            # 改进API调用：增加状态码检查，移除可能无效的anon参数
             curl -s -w "HTTP_STATUS:%{http_code}" \
                  -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
                  -H "Accept: application/vnd.github+json" \
                  "${{ github.api_url }}/repos/${{ github.repository }}/contributors?per_page=100&page=$page" > page_with_status.json
             
             # 分离状态码和响应体
-            grep -o 'HTTP_STATUS:[0-9]*' page_with_status.json > status.tmp
-            HTTP_STATUS=$(cat status.tmp | cut -d: -f2)
+            HTTP_STATUS=$(grep -o 'HTTP_STATUS:[0-9]*' page_with_status.json | cut -d: -f2)
             sed 's/HTTP_STATUS:[0-9]*//' page_with_status.json > page.json
             
-            # 调试输出状态码
-            echo "Page $page HTTP status: $HTTP_STATUS"
-            
-            # 处理常见错误状态
-            if [ "$HTTP_STATUS" -eq 403 ]; then
-              echo "Error: API rate limited or insufficient permissions"
-              break
-            elif [ "$HTTP_STATUS" -eq 404 ]; then
-              echo "Error: Repository not found (check repo path)"
-              break
-            elif [ "$HTTP_STATUS" -ne 200 ]; then
-              echo "Error: Unexpected HTTP status $HTTP_STATUS"
-              cat page.json  # 输出错误详情
+            # 处理HTTP错误
+            if [ "$HTTP_STATUS" -ne 200 ]; then
+              echo "API请求失败，状态码: $HTTP_STATUS"
+              cat page.json
               break
             fi
 
-            # 验证响应是否为数组
-            if ! jq -e 'type == "array"' page.json >/dev/null 2>&1; then
-              echo "Stopping at page $page: Invalid array response"
-              cat page.json  # 输出无效响应内容
+            # 验证响应格式
+            if [ "$(jq 'type' page.json 2>/dev/null)" != '"array"' ]; then
+              echo "响应不是有效的数组，停止抓取"
               break
             fi
 
             len=$(jq 'length' page.json | tr -d '\n\r')
-            echo "Page $page has $len contributors"
-            if [ "$len" -eq 0 ]; then
-              break
-            fi
+            [ "$len" = "0" ] && break
 
             jq -c '.[]' page.json >> contributors.json
             ((page++))
           done
 
-          # 生成贡献者列表（放宽条件）
-          jq -r '
-            select(type == "object") | 
-            if .login then "- [@\(.login)](https://github.com/\(.login))" 
-            else "- Anonymous Contributor" 
-            end
-          ' contributors.json | sort -u > contributors.md
+          # 生成贡献者列表，增加容错处理
+          jq -r 'select(type=="object" and .login) | "- [@\(.login)](https://github.com/\(.login))"' contributors.json 2>/dev/null \
+          | sort -u > contributors.md
 
-          # 确保至少有内容（即使API调用失败也显示维护者）
+          # 确保文件不为空
           if [ ! -s contributors.md ]; then
-            echo "Warning: No contributors data found, using fallback"
-            # 添加仓库主维护者（可手动修改为实际维护者）
+            echo "警告：未找到贡献者数据，使用默认内容"
             echo "- [@$(echo ${{ github.repository }} | cut -d/ -f1)](https://github.com/$(echo ${{ github.repository }} | cut -d/ -f1))" > contributors.md
           fi
 
-          echo "Generated contributors list:"
+          echo "生成的贡献者列表："
           cat contributors.md
 
       - name: Inject into README.md
