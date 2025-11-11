@@ -22,10 +22,10 @@ jobs:
           
           # 完整遍历所有贡献者分页（最多10页避免无限循环）
           while [ $page -le 10 ]; do
-            # 调用 API 时移除 anon=1 参数，确保获取全部贡献者
+            # 调用 API 获取贡献者（包含所有类型贡献者）
             curl -s -w "HTTP_STATUS:%{http_code}" \
                  -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-                 -H "Accept: application/vnd.github+json" \
+                 -H "Accept: application/vnd.github.v3+json" \  # 使用明确的API版本
                  "${{ github.api_url }}/repos/${{ github.repository }}/contributors?per_page=100&page=$page" > page_with_status.json
             
             # 提取 HTTP 状态码和响应体
@@ -47,6 +47,11 @@ jobs:
 
             len=$(jq 'length' page.json | tr -d '\n\r')
             echo "第 $page 页获取到 $len 个贡献者"
+            
+            # 输出当前页贡献者登录名（调试用）
+            echo "第 $page 页贡献者列表："
+            jq -r '.[]?.login' page.json
+            
             if [ "$len" -eq 0 ]; then
               break  # 没有更多贡献者
             fi
@@ -56,16 +61,15 @@ jobs:
             ((page++))
           done
 
-          # 生成带头像的贡献者列表
-          # 格式：[![Avatar](https://github.com/{login}.png?size=24) @{login}](https://github.com/{login})
+          # 生成仅包含头像和链接的贡献者列表（移除@用户名文本）
           jq -r 'select(type=="object" and .login) | 
-                 "- [![Avatar](https://github.com/\(.login).png?size=24) @\(.login)](https://github.com/\(.login))"' \
-          contributors.json 2>/dev/null | sort -u > contributors.md
+                 "- [![Avatar](https://github.com/\(.login).png?size=24)](https://github.com/\(.login))"' \
+          contributors.json > contributors.md  # 移除错误重定向，便于排查问题
 
-          # 容错处理：如果没有获取到贡献者，至少显示仓库所有者
+          # 容错处理：如果没有获取到贡献者，显示仓库所有者
           if [ ! -s contributors.md ]; then
             owner=$(echo ${{ github.repository }} | cut -d/ -f1)
-            echo "- [![Avatar](https://github.com/$owner.png?size=24) @$owner](https://github.com/$owner)" > contributors.md
+            echo "- [![Avatar](https://github.com/$owner.png?size=24)](https://github.com/$owner)" > contributors.md
           fi
 
           echo "生成的贡献者列表："
