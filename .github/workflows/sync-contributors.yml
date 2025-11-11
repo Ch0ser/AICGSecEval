@@ -21,18 +21,35 @@ jobs:
       - name: Install dependencies (jq + perl)
         run: sudo apt-get update && sudo apt-get install -y jq perl
 
-      # 步骤1：生成HTML并写入临时文件（避免变量传递截断）
-      - name: Generate contributors HTML
+      # 关键修复：优化curl校验+兼容文件大小检测+错误捕获
+      - name: Generate contributors HTML (fixed compatibility)
         id: gen_contrib
         run: |
+          set -euo pipefail # 开启严格模式，捕获所有错误
           OWNER="${{ github.repository_owner }}"
           REPO="${{ github.event.repository.name }}"
+          API_URL="https://api.github.com/repos/$OWNER/$REPO/contributors?per_page=100"
           
-          # 获取贡献者数据
-          CONTRIBUTORS=$(curl -s -H "Authorization: Bearer ${{ github.token }}" \
-            "https://api.github.com/repos/$OWNER/$REPO/contributors?per_page=100")
+          echo "🔍 Fetching from $API_URL"
+          # curl 增强：获取HTTP状态码+输出响应体，校验200状态
+          RESPONSE=$(curl -s -w "%{http_code}" -H "Authorization: Bearer ${{ github.token }}" "$API_URL")
+          HTTP_CODE=$(echo "$RESPONSE" | tail -c 4) # 提取最后4个字符（状态码）
+          CONTRIBUTORS=$(echo "$RESPONSE" | head -c -4) # 提取响应体（排除状态码）
           
-          # 用jq生成HTML并写入临时文件（无变量长度限制）
+          # 校验HTTP状态码
+          if [ "$HTTP_CODE" -ne 200 ]; then
+            echo "❌ API request failed (HTTP $HTTP_CODE)"
+            echo "Response: $CONTRIBUTORS"
+            exit 1
+          fi
+          
+          # 校验响应体是否为有效JSON
+          if ! echo "$CONTRIBUTORS" | jq . > /dev/null 2>&1; then
+            echo "❌ Invalid JSON response from API"
+            exit 1
+          fi
+          
+          # 生成HTML并写入临时文件（兼容写法）
           echo "$CONTRIBUTORS" | jq -r '
             .[] | 
             "<a href=\"\(.html_url)\" target=\"_blank\" rel=\"noopener noreferrer\" title=\"\(.login)\">" +
@@ -40,12 +57,20 @@ jobs:
             "</a>"
           ' | tr -d '\n' > /tmp/contributors.html
           
-          # 验证临时文件（确保非空）
-          HTML_SIZE=$(stat -c%s /tmp/contributors.html)
+          # 兼容方式获取文件大小（替换stat，避免环境差异）
+          HTML_SIZE=$(wc -c < /tmp/contributors.html)
           echo "📏 HTML file size: $HTML_SIZE bytes"
-          [ $HTML_SIZE -eq 0 ] && echo "❌ HTML is empty" && exit 1
+          
+          # 校验HTML非空
+          if [ "$HTML_SIZE" -lt 100 ]; then
+            echo "❌ HTML content is too small (likely invalid)"
+            cat /tmp/contributors.html # 输出内容调试
+            exit 1
+          fi
+          
+          echo "✅ Contributors HTML generated successfully"
 
-      # 步骤2：用perl替换（支持长字符串+精准多行匹配）
+      # 保持perl替换逻辑（已验证有效）
       - name: Update README files (perl replacement)
         id: update_files
         run: |
@@ -54,40 +79,35 @@ jobs:
             local start="<!-- readme: contributors -start -->"
             local end="<!-- readme: contributors -end -->"
             
-            # 检查文件和标记
             [ ! -f "$file" ] && echo "⚠️ $file not found" && return 1
             if ! grep -qF "$start" "$file" || ! grep -qF "$end" "$file"; then
               echo "❌ $file missing tags (start/end)"
-              grep -nF "$start\|$end" "$file" || echo "   Tags not found at all"
+              grep -nF "$start\|$end" "$file" || echo "   Tags not found"
               return 1
             fi
             
-            # 核心：用perl进行多行替换（支持长字符串，无截断）
+            # Perl多行替换（稳定处理长字符串）
             perl -0777 -i.bak -pe "
               s|$start\n.*?$end|$start\n$(cat /tmp/contributors.html)\n$end|gs
             " "$file"
-            
-            # 删除备份文件
             rm -f "$file.bak"
             
-            # 验证替换结果（检查标记之间是否非空）
-            CONTENT_BETWEEN_TAGS=$(awk -v s="$start" -v e="$end" '
+            # 验证替换结果
+            CONTENT_BETWEEN=$(awk -v s="$start" -v e="$end" '
               $0 == s { flag=1; next }
               $0 == e { flag=0 }
               flag { print }
             ' "$file")
             
-            if [ -n "$CONTENT_BETWEEN_TAGS" ]; then
-              echo "✅ $file updated successfully"
-              echo "📋 Content between tags (preview): ${CONTENT_BETWEEN_TAGS:0:100}..."
+            if [ -n "$CONTENT_BETWEEN" ]; then
+              echo "✅ $file updated (preview: ${CONTENT_BETWEEN:0:80}...)"
               return 0
             else
-              echo "❌ $file update failed: content between tags is empty"
+              echo "❌ $file update failed: no content between tags"
               return 1
             fi
           }
           
-          # 执行更新
           if update_readme "README.md" && update_readme "README_zh.md"; then
             echo "update_success=true" >> "$GITHUB_ENV"
           else
@@ -108,6 +128,6 @@ jobs:
           if [ "${{ env.update_success }}" == "true" ]; then
             echo "🎉 贡献者列表更新成功！"
           else
-            echo "❌ 更新失败，请查看上方日志中的「Content between tags」信息"
+            echo "❌ 更新失败，请查看上方日志详情"
             exit 1
           fi
