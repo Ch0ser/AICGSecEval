@@ -225,7 +225,8 @@ We sincerely appreciate their invaluable contributions to this project.
 
 **🙌 Contributors**
 <!-- readme: contributors -start -->
-- [![Avatar](https://github.com/Ch0ser.png?size=24) @Ch0ser](https://github.com/Ch0ser)
+
+
 
 <!-- readme: contributors -end -->
 
