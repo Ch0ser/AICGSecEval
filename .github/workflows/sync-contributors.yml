@@ -1,0 +1,59 @@
+name: Sync Contributors
+
+# 仅手动触发
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # 用 GITHUB_TOKEN 即可推代码
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Generate contributors markdown
+        run: |
+          # 分页拉全量贡献者（含匿名）
+          page=1
+          > contributors_raw.json
+          while :; do
+            curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+                 -H "Accept: application/vnd.github+json" \
+                 "${{ github.api_url }}/repos/${{ github.repository }}/contributors?per_page=100&page=$page&anon=1" >> contributors_page.json
+            # 空页即停
+            [ "$(jq 'length' contributors_page.json)" -eq 0 ] && break
+            jq '.[]' contributors_page.json >> contributors_raw.json
+            ((page++))
+          done
+
+          # 只保留有 login 字段的用户（匿名 contributor 没有 login）
+          jq -r 'select(.login) | "- [@\(.login)](https://github.com/\(.login))"' contributors_raw.json \
+          | sort -u > contributors.md
+
+          echo "Generated contributors list:"
+          cat contributors.md
+
+      - name: Inject into README.md
+        run: |
+          perl -0777 -pe '
+            s/(<!-- readme: contributors -start -->).*?(<!-- readme: contributors -end -->)/$1\n'"$(cat contributors.md)"'\n$2/s
+          ' README.md > README.md.tmp && mv README.md.tmp README.md
+
+      - name: Inject into README_zh.md
+        run: |
+          perl -0777 -pe '
+            s/(<!-- readme: contributors -start -->).*?(<!-- readme: contributors -end -->)/$1\n'"$(cat contributors.md)"'\n$2/s
+          ' README_zh.md > README_zh.md.tmp && mv README_zh.md.tmp README_zh.md
+
+      - name: Commit & push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md README_zh.md
+          git diff --cached --quiet || (
+            git commit -m "docs: sync contributors [skip ci]" \
+            && git push
+          )
